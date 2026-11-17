@@ -702,6 +702,7 @@ label b { color: var(--text); font-weight: 500; }
 .post-dialog label { display: grid; gap: 6px; }
 .post-dialog input, .post-dialog textarea { width: 100%; }
 .auto-count select { height: 32px; border-radius: var(--radius-control); font-size: 13px; padding: 0 10px; max-width: 160px; }
+.auto-count input[type="text"] { height: 32px; border-radius: var(--radius-control); font-size: 13px; padding: 0 10px; max-width: 160px; }
 .short-frame video:not(.short-ready) { object-fit: cover; }
 
 .background-job { margin: 0; padding: 10px 12px; border-radius: var(--radius-inner); background: var(--ground); color: var(--muted); font-size: 13px; line-height: 19px; }

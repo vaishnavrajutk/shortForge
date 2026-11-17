@@ -15,6 +15,8 @@ use tokio::{
 use uuid::Uuid;
 use tract_onnx::prelude::*;
 
+mod gameplay;
+
 const DEFAULT_DB: &str = "postgres://shortforge:shortforge_dev_password@127.0.0.1:55434/shortforge";
 
 #[derive(Clone)]
@@ -592,6 +594,10 @@ async fn dispatch_web_command(
                 web_argument(&args, "mediaPath")?,
                 web_argument(&args, "maxClips")?,
                 args.get("language").and_then(|value| value.as_str()).map(String::from),
+                args.get("mode").and_then(|value| value.as_str()).map(String::from),
+                args.get("minSeconds").and_then(serde_json::Value::as_f64),
+                args.get("maxSeconds").and_then(serde_json::Value::as_f64),
+                args.get("game").and_then(|value| value.as_str()).map(String::from),
                 app.state(),
             )
             .await?,
@@ -2395,26 +2401,34 @@ fn select_top(mut candidates: Vec<AutoHighlight>, count: usize) -> Vec<AutoHighl
 }
 
 fn pick_highlights(segments: &[TranscriptSegment], duration: f64, max_clips: usize, language: &str, loudness: &[(f64, f64)], replay: &[(f64, f64, f64)]) -> Vec<AutoHighlight> {
+    pick_highlights_with(segments, duration, max_clips, language, loudness, replay, SPEECH_CLIP_LENGTH)
+}
+
+/// Clip lengths used when the user does not choose: 15-60 s for talk, 10-30 s for gameplay.
+const SPEECH_CLIP_LENGTH: gameplay::ClipLength = gameplay::ClipLength { min: 15.0, max: 60.0 };
+const GAMEPLAY_CLIP_LENGTH: gameplay::ClipLength = gameplay::ClipLength { min: 10.0, max: 30.0 };
+
+fn pick_highlights_with(segments: &[TranscriptSegment], duration: f64, max_clips: usize, language: &str, loudness: &[(f64, f64)], replay: &[(f64, f64, f64)], length: gameplay::ClipLength) -> Vec<AutoHighlight> {
     let median_loudness = {
         let mut levels: Vec<f64> = loudness.iter().map(|(_, l)| *l).collect();
         levels.sort_by(f64::total_cmp);
         levels.get(levels.len() / 2).copied().unwrap_or(-23.0)
     };
-    const MIN_SECONDS: f64 = 15.0;
-    const TARGET_SECONDS: f64 = 35.0;
-    const MAX_SECONDS: f64 = 60.0;
+    let (min_len, max_len) = (length.min, length.max);
+    // Aim a little under the middle of the range (35 s for 15-60 s): tighter clips hold attention.
+    let target_len = min_len + (max_len - min_len) * 0.45;
     let mut candidates = Vec::new();
     for first in 0..segments.len() {
         let start = segments[first].start;
         let mut last = None;
         for (index, segment) in segments.iter().enumerate().skip(first) {
             let length = segment.end - start;
-            if length > MAX_SECONDS {
+            if length > max_len {
                 break;
             }
-            if length >= MIN_SECONDS {
+            if length >= min_len {
                 last = Some(index);
-                if length >= TARGET_SECONDS && ends_sentence(&segment.text) {
+                if length >= target_len && ends_sentence(&segment.text) {
                     break;
                 }
             }
@@ -2422,7 +2436,7 @@ fn pick_highlights(segments: &[TranscriptSegment], duration: f64, max_clips: usi
         let Some(last) = last else { continue };
         let window = &segments[first..=last];
         let end = window[window.len() - 1].end.min(duration);
-        if end - start < MIN_SECONDS {
+        if end - start < min_len {
             continue;
         }
         let text = window.iter().map(|segment| segment.text.as_str()).collect::<Vec<_>>().join(" ");
@@ -2567,6 +2581,40 @@ fn choose_whisper_model(language: Option<&str>, fast: &std::path::Path, accurate
     }
 }
 
+/// Momentary loudness of the source's own audio, for gameplay mode (no transcription needed).
+async fn measure_loudness(source: &std::path::Path, state: &AppState) -> Result<Vec<(f64, f64)>, String> {
+    let output = run_cancellable(
+        "ffmpeg",
+        &[
+            "-hide_banner".into(), "-nostats".into(), "-i".into(), source.to_string_lossy().to_string(),
+            "-vn".into(), "-af".into(), "ebur128=metadata=1,ametadata=print:key=lavfi.r128.M:file=-".into(),
+            "-f".into(), "null".into(), "-".into(),
+        ],
+        state,
+    )
+    .await?;
+    Ok(parse_loudness(&output))
+}
+
+/// How much the picture changes over time: a few small greyscale frames a second, each compared
+/// with the one before by FFmpeg's `signalstats`. Fast driving, fights and explosions score high.
+async fn measure_motion(source: &std::path::Path, duration: f64, state: &AppState) -> Result<Vec<(f64, f64)>, String> {
+    // Fewer samples on very long sessions keep the scan quick.
+    let fps = if duration > 2.0 * 3600.0 { 2 } else { 4 };
+    let output = run_cancellable(
+        "ffmpeg",
+        &[
+            "-hide_banner".into(), "-nostats".into(), "-hwaccel".into(), "auto".into(),
+            "-i".into(), source.to_string_lossy().to_string(), "-an".into(),
+            "-vf".into(), format!("fps={fps},scale=160:-2,format=gray,signalstats,metadata=print:key=lavfi.signalstats.YDIF:file=-"),
+            "-f".into(), "null".into(), "-".into(),
+        ],
+        state,
+    )
+    .await?;
+    Ok(gameplay::parse_motion(&output))
+}
+
 async fn transcribe_with_whisper(source: &std::path::Path, state: &AppState, forced_language: Option<&str>) -> Result<(Vec<TranscriptSegment>, String, Vec<(f64, f64)>), String> {
     let fast = std::env::var_os("SHORTFORGE_WHISPER_MODEL")
         .map(PathBuf::from)
@@ -2663,8 +2711,19 @@ async fn find_auto_highlights(
     media_path: String,
     max_clips: u32,
     language: Option<String>,
+    mode: Option<String>,
+    min_seconds: Option<f64>,
+    max_seconds: Option<f64>,
+    game: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<AutoHighlight>, String> {
+    // "speech" clips what is said, "gameplay" clips game sound and on-screen action,
+    // "auto" (the default) uses speech when there is enough of it and gameplay otherwise.
+    let mode = mode.unwrap_or_else(|| "auto".into());
+    if !["auto", "speech", "gameplay"].contains(&mode.as_str()) {
+        return Err("Clip mode must be auto, speech or gameplay.".into());
+    }
+    let game = game.map(|name| name.trim().chars().take(40).collect::<String>()).filter(|name| !name.is_empty());
     // A two-letter Whisper language code the user picked, or None to auto-detect.
     let language = language.filter(|code| code.len() == 2 && code.chars().all(|c| c.is_ascii_lowercase()));
     if !(1..=20).contains(&max_clips) {
@@ -2679,8 +2738,8 @@ async fn find_auto_highlights(
     .await
     .map_err(|error| error.to_string())?;
     let (duration, has_audio) = row.ok_or("The selected source is not in this project's media library.")?;
-    if !has_audio {
-        return Err("The auto clipper needs a source with an audio track.".into());
+    if mode == "speech" && !has_audio {
+        return Err("Speech mode needs a source with an audio track. Try gameplay mode.".into());
     }
     let media_root = fs::canonicalize(&state.media_dir)
         .await
@@ -2694,10 +2753,30 @@ async fn find_auto_highlights(
     if !duration.is_finite() || duration <= 0.0 || duration > 4.0 * 3600.0 {
         return Err("The auto clipper supports media up to 4 hours long.".into());
     }
-    let (segments, language, loudness) = transcribe_with_whisper(&source, state.inner(), language.as_deref()).await?;
-    if segments.is_empty() {
-        return Err("No speech was found in this source.".into());
+    // Speech first, unless the user asked for gameplay or there is no sound to transcribe.
+    let transcript = if mode != "gameplay" && has_audio {
+        match transcribe_with_whisper(&source, state.inner(), language.as_deref()).await {
+            Ok(result) => Some(result),
+            Err(error) if mode == "speech" || error == STOPPED => return Err(error),
+            // Auto mode without whisper installed still works on gameplay.
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    if mode == "speech" && transcript.as_ref().is_some_and(|(segments, _, _)| segments.is_empty()) {
+        return Err("No speech was found in this source. Try gameplay mode.".into());
     }
+    let use_gameplay = match &transcript {
+        _ if mode == "gameplay" => true,
+        None => true,
+        Some((segments, _, _)) if mode == "auto" => {
+            gameplay::speech_is_sparse(&segments.iter().map(|segment| (segment.start, segment.end)).collect::<Vec<_>>(), duration)
+        }
+        Some(_) => false,
+    };
+    let default_length = if use_gameplay { GAMEPLAY_CLIP_LENGTH } else { SPEECH_CLIP_LENGTH };
+    let length = gameplay::ClipLength::new(min_seconds, max_seconds, default_length.min, default_length.max);
     let kept: Vec<(f64, f64)> = sqlx::query_as(
         "SELECT start_seconds,end_seconds FROM auto_highlights WHERE project_id=$1 AND media_path=$2 AND output_path IS NOT NULL",
     )
@@ -2718,12 +2797,41 @@ async fn find_auto_highlights(
     .flatten()
     .and_then(|json| serde_json::from_str(&json).ok())
     .unwrap_or_default();
-    let shortlist = pick_highlights(&segments, duration, (max_clips as usize + kept.len()) * 3, &language, &loudness, &replay);
-    let clips: Vec<AutoHighlight> = rank_by_picture(&source, shortlist, max_clips as usize * 3 + kept.len()).await
-        .into_iter()
-        .filter(|clip| kept.iter().all(|(start, end)| clip.end_seconds <= *start || clip.start_seconds >= *end))
-        .take(max_clips as usize)
-        .collect();
+    let clips: Vec<AutoHighlight> = if use_gameplay {
+        let loudness = match &transcript {
+            Some((_, _, loudness)) => loudness.clone(),
+            None if has_audio => measure_loudness(&source, state.inner()).await?,
+            None => Vec::new(),
+        };
+        let motion = measure_motion(&source, duration, state.inner()).await?;
+        let curve = gameplay::intensity(duration, &loudness, &motion);
+        let replayed = |start: f64, end: f64| replay_lift(&replay, start, end);
+        gameplay::pick_gameplay(&curve, duration, max_clips as usize + kept.len(), length, &replayed)
+            .into_iter()
+            .filter(|pick| kept.iter().all(|(start, end)| pick.end <= *start || pick.start >= *end))
+            .take(max_clips as usize)
+            .map(|pick| AutoHighlight {
+                id: Uuid::new_v4(),
+                start_seconds: pick.start,
+                end_seconds: pick.end,
+                title: gameplay::gameplay_title(game.as_deref(), pick.kind, pick.start),
+                reason: pick.reasons.join(", "),
+                score: pick.score,
+                output_path: None,
+                language: String::new(),
+                description: gameplay::gameplay_description(game.as_deref(), pick.kind),
+                hashtags: gameplay::gameplay_hashtags(game.as_deref()),
+            })
+            .collect()
+    } else {
+        let (segments, language, loudness) = transcript.expect("speech mode has a transcript");
+        let shortlist = pick_highlights_with(&segments, duration, (max_clips as usize + kept.len()) * 3, &language, &loudness, &replay, length);
+        rank_by_picture(&source, shortlist, max_clips as usize * 3 + kept.len()).await
+            .into_iter()
+            .filter(|clip| kept.iter().all(|(start, end)| clip.end_seconds <= *start || clip.start_seconds >= *end))
+            .take(max_clips as usize)
+            .collect()
+    };
 
     let mut transaction = state.db.begin().await.map_err(|error| error.to_string())?;
     sqlx::query("DELETE FROM auto_highlights WHERE project_id=$1 AND media_path=$2 AND output_path IS NULL")

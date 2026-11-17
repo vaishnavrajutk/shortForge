@@ -23,6 +23,9 @@ function fetchLocal(input:RequestInfo|URL,init?:RequestInit):Promise<Response>{
     throw error;
   });
 }
+type ClipMode="auto"|"speech"|"gameplay";
+const CLIP_LENGTHS={short:[10,30],medium:[15,60],long:[30,90]} as const;
+type ClipLengthKey=keyof typeof CLIP_LENGTHS;
 function readPreference(key:string):string|null{
   try{return window.localStorage.getItem(key)}catch{return null}
 }
@@ -134,6 +137,9 @@ export default function App() {
   const [highlights,setHighlights]=useState<AutoHighlight[]>([]);
   const [highlightCount,setHighlightCount]=useState(5);
   const [spokenLanguage,setSpokenLanguage]=useState(()=>readPreference("shortforge.spokenLanguage")??"");
+  const [clipMode,setClipMode]=useState<ClipMode>(()=>{const saved=readPreference("shortforge.clipMode");return saved==="speech"||saved==="gameplay"?saved:"auto";});
+  const [gameName,setGameName]=useState(()=>readPreference("shortforge.gameName")??"");
+  const [clipLength,setClipLength]=useState<ClipLengthKey>(()=>{const saved=readPreference("shortforge.clipLength");return saved==="short"||saved==="long"?saved:"medium";});
   const [editingPost,setEditingPost]=useState<{id:string;title:string;description:string;hashtags:string}|null>(null);
   const [highlightScanning,setHighlightScanning]=useState(false);
   const [mode,setMode]=useState<"auto"|"manual">(()=>readPreference("shortforge.mode")==="manual"?"manual":"auto");
@@ -241,6 +247,9 @@ export default function App() {
   useEffect(()=>{writePreference("shortforge.sceneThreshold",String(sceneThreshold))},[sceneThreshold]);
   useEffect(()=>{writePreference("shortforge.mode",mode)},[mode]);
   useEffect(()=>{writePreference("shortforge.spokenLanguage",spokenLanguage)},[spokenLanguage]);
+  useEffect(()=>{writePreference("shortforge.clipMode",clipMode)},[clipMode]);
+  useEffect(()=>{writePreference("shortforge.gameName",gameName)},[gameName]);
+  useEffect(()=>{writePreference("shortforge.clipLength",clipLength)},[clipLength]);
   useEffect(()=>{
     if(!isTauri())return;
     let unlisten:(()=>void)|undefined;
@@ -407,12 +416,16 @@ export default function App() {
       setSceneCuts(cuts);setStatus(cuts.length?`Found ${cuts.length} scene cut candidates. Review each before adding a shot.`:"No scene cut candidates found at this threshold.");
     }catch(error){setStatus(String(error))}finally{setSceneScanning(false)}
   }
+  function clipperOptions(){
+    const [minSeconds,maxSeconds]=CLIP_LENGTHS[clipLength];
+    return {language:clipMode==="gameplay"?null:spokenLanguage||null,mode:clipMode,minSeconds,maxSeconds,game:clipMode==="speech"?null:gameName.trim()||null};
+  }
   async function findHighlights(){
     if(!active||!media||media.missing||highlightScanning)return;
-    setHighlightScanning(true);setStatus("Transcribing locally with whisper.cpp and scoring clips. Long videos can take several minutes.");
+    setHighlightScanning(true);setStatus(clipMode==="gameplay"?"Scanning game sound and on-screen action for highlights. Long sessions can take several minutes.":"Transcribing locally with whisper.cpp and scoring clips. Long videos can take several minutes.");
     try{
-      const items=await invoke<AutoHighlight[]>("find_auto_highlights",{projectId:active.id,mediaPath:media.path,maxClips:highlightCount});
-      setHighlights(items);setStatus(items.length?`Found ${items.length} clip ideas. Preview each and add the ones you like.`:"No clip-length speech found in this source.");
+      const items=await invoke<AutoHighlight[]>("find_auto_highlights",{projectId:active.id,mediaPath:media.path,maxClips:highlightCount,...clipperOptions()});
+      setHighlights(items);setStatus(items.length?`Found ${items.length} clip ideas. Preview each and add the ones you like.`:"No clip-length moments found in this source.");
     }catch(error){setStatus(String(error))}finally{setHighlightScanning(false)}
   }
   async function findSilence(){
@@ -456,14 +469,14 @@ export default function App() {
   }
   async function runAuto(projectId:string,source:Probe){
     if(autoRunRef.current)return;
-    if(!source.has_audio){setStatus("Auto mode needs a video with speech. This source has no audio track.");return;}
+    if(!source.has_audio&&clipMode==="speech"){setStatus("Speech mode needs a video with sound. Switch to Gameplay to clip this source.");return;}
     autoRunRef.current=true;stopRequestedRef.current=false;setHighlightScanning(true);setRunningProjectId(projectId);
     try{
       const listenStart=Date.now();
       setRunStartedAt(started=>started??listenStart);
       setStepTiming({start:listenStart,total:source.duration_seconds*learnedRate("listen",0.9)});
       setPhase("listen");
-      const findPicks=()=>invoke<AutoHighlight[]>("find_auto_highlights",{projectId,mediaPath:source.path,maxClips:highlightCount,language:spokenLanguage||null});
+      const findPicks=()=>invoke<AutoHighlight[]>("find_auto_highlights",{projectId,mediaPath:source.path,maxClips:highlightCount,...clipperOptions()});
       const picks=await findPicks().catch(error=>{
         if(String(error).includes("Another job is already running"))setBackgroundJob(true);
         throw error;
@@ -471,7 +484,7 @@ export default function App() {
       learnRate("listen",(Date.now()-listenStart)/1000/Math.max(1,source.duration_seconds));
       setHighlights(picks);
       const todo=picks.filter(pick=>!pick.output_path);
-      if(!todo.length){setStatus(picks.length?"No new moments found that don't overlap your finished shorts.":"No clip-length speech found in this video.");return;}
+      if(!todo.length){setStatus(picks.length?"No new moments found that don't overlap your finished shorts.":"No clip-length moments found in this video.");return;}
       let ready=0;
       const renderStart=Date.now();
       for(const [index,item] of todo.entries()){
@@ -804,7 +817,7 @@ export default function App() {
         <p>Paste a YouTube link or import a file. ShortForge transcribes it on this computer, picks the strongest 15–60 second moments, and renders them as vertical shorts ready to post.</p>
         <div className="home-link"><input type="url" aria-label="Video link" placeholder="https://www.youtube.com/watch?v=…" value={linkUrl} onChange={event=>setLinkUrl(event.target.value)}/><button type="submit" className="primary-btn" disabled={busy||!linkUrl.trim()}>{busy?"Working…":"Start"}</button></div>
         <button type="button" className="text-btn home-file" onClick={()=>setShowProjectDialog(true)}><FolderOpen size={15}/> Start with a file from this computer</button>
-        <ol className="how-it-works" aria-label="How it works"><li><b>Get the video</b><span>Downloads the link or copies your file.</span></li><li><b>Find the moments</b><span>Transcribes the speech and ranks 15–60 s clips by hook, pace and energy.</span></li><li><b>Render shorts</b><span>9:16 video framed on the faces, with title, description and hashtags to copy.</span></li></ol>
+        <ol className="how-it-works" aria-label="How it works"><li><b>Get the video</b><span>Downloads the link or copies your file.</span></li><li><b>Find the moments</b><span>Ranks talk by hook, pace and energy, or gameplay by game sound and on-screen action.</span></li><li><b>Render shorts</b><span>9:16 video framed on the faces, with title, description and hashtags to copy.</span></li></ol>
       </form>
       <section className="home-list" aria-label="Projects">
         <div className="list-head">
@@ -841,7 +854,10 @@ export default function App() {
         {media&&!media.missing?<div className="auto-source-media"><video ref={sourceVideoRef} key={media.path} src={mediaSource(media.path)} controls playsInline preload="metadata" onLoadedMetadata={event=>applyPendingSeek(event.currentTarget)}/><div className="auto-source-row"><div><b>{media.file_name}</b><small>{formatDuration(media.duration_seconds)} · {media.width}×{media.height}{media.has_audio?"":" · no audio"}</small></div><button className="icon-btn" aria-label={`Remove ${media.file_name}`} title="Remove video" onClick={()=>void deleteAsset(media)} disabled={busy||highlightScanning}><Trash2 size={15}/></button></div></div>:phase==="fetch"?<div className="source-placeholder" aria-hidden="true"/>:<button className="dropzone" onClick={()=>void chooseVideo()}><div className="upload-orbit"><FolderOpen size={20}/></div><b>Add a long video</b><span>Paste a link above or pick a file.</span></button>}
         {assets.length>1&&<div className="source-list" role="list" aria-label="Videos in this project">{assets.map(item=><div role="listitem" key={item.path} className={`source-row ${media?.path===item.path?"current":""}`}><button className="source-pick" onClick={()=>setMedia(item)} disabled={highlightScanning} aria-current={media?.path===item.path?"true":undefined}><span className="source-thumb">{thumbnailUrls[item.path]?<img src={thumbnailUrls[item.path]} alt=""/>:<Film size={14}/>}</span><span className="source-name"><b>{item.file_name}</b><small>{formatDuration(item.duration_seconds)}</small></span></button><button className="icon-btn" aria-label={`Remove ${item.file_name}`} title="Remove video" onClick={()=>void deleteAsset(item)} disabled={busy||highlightScanning}><Trash2 size={14}/></button></div>)}</div>}
         <div className="auto-run">
-          <label className="auto-count">Spoken language<select value={spokenLanguage} onChange={event=>setSpokenLanguage(event.target.value)} disabled={highlightScanning}><option value="">Auto-detect</option>{[["ml","Malayalam"],["ta","Tamil"],["hi","Hindi"],["te","Telugu"],["kn","Kannada"],["bn","Bengali"],["mr","Marathi"],["en","English"],["es","Spanish"],["ar","Arabic"]].map(([code,name])=><option key={code} value={code}>{name}</option>)}</select></label>
+          <label className="auto-count">Footage<select value={clipMode} onChange={event=>setClipMode(event.target.value as ClipMode)} disabled={highlightScanning}><option value="auto">Auto-detect</option><option value="speech">Talking / commentary</option><option value="gameplay">Gameplay</option></select></label>
+          {clipMode!=="speech"&&<label className="auto-count">Game<input type="text" maxLength={40} placeholder="e.g. GTA 6" value={gameName} onChange={event=>setGameName(event.target.value)} disabled={highlightScanning}/></label>}
+          <div className="auto-count"><span>Clip length</span><div className="segmented">{(Object.keys(CLIP_LENGTHS) as ClipLengthKey[]).map(key=><button key={key} className={clipLength===key?"current":""} onClick={()=>setClipLength(key)} disabled={highlightScanning}>{CLIP_LENGTHS[key][0]}–{CLIP_LENGTHS[key][1]}s</button>)}</div></div>
+          {clipMode!=="gameplay"&&<label className="auto-count">Spoken language<select value={spokenLanguage} onChange={event=>setSpokenLanguage(event.target.value)} disabled={highlightScanning}><option value="">Auto-detect</option>{[["ml","Malayalam"],["ta","Tamil"],["hi","Hindi"],["te","Telugu"],["kn","Kannada"],["bn","Bengali"],["mr","Marathi"],["en","English"],["es","Spanish"],["ar","Arabic"]].map(([code,name])=><option key={code} value={code}>{name}</option>)}</select></label>}
           <div className="auto-count"><span>Shorts to make</span><div className="segmented">{[3,5,8].map(count=><button key={count} className={highlightCount===count?"current":""} onClick={()=>setHighlightCount(count)}>{count}</button>)}</div></div>
           {backgroundJob&&!highlightScanning&&phase==="idle"&&<p className="background-job">Another video is still being processed on this computer. Its shorts are saved when it finishes.</p>}
           {highlightScanning||phase==="fetch"||backgroundJob?<button className="stop-btn auto-go" onClick={()=>void stopAuto()}><span className="stop-square" aria-hidden="true"/> Stop</button>:<button className="primary-btn auto-go" onClick={()=>{if(active&&media)void runAuto(active.id,media)}} disabled={!active||!media||media.missing||busy}>{highlights.some(item=>item.output_path)?"Find more shorts":"Make shorts"}</button>}
@@ -888,7 +904,7 @@ export default function App() {
           <div className="scene-card">
             <div className="scene-header"><div><b>Auto clipper</b></div><button className="small-btn" onClick={()=>void findHighlights()} disabled={!active||!media||media.missing||highlightScanning||!media.has_audio}>{highlightScanning?"Clipping…":"Find clips"}</button></div>
             <label className="scene-threshold">Clips <b>{highlightCount}</b><input type="range" min={1} max={20} step={1} value={highlightCount} onChange={event=>setHighlightCount(Number(event.target.value))}/></label>
-            {!media?<div className="scene-empty">No footage selected</div>:!media.has_audio?<div className="scene-empty">This source has no audio track</div>:highlights.length===0?<div className={`scene-empty ${highlightScanning?"working listen":""}`}>{highlightScanning?"Listening to the speech…":"Transcribes speech and ranks 15–60 s moments"}</div>:<div className="scene-ranges">{highlights.map(item=><div className="scene-range" key={item.id}><button className="scene-preview" onClick={()=>{setMonitorMode("source");previewSceneRange(item.start_seconds)}} title={item.reason}><span>{item.title||"Untitled clip"}</span><small>{formatDuration(item.start_seconds)} – {formatDuration(item.end_seconds)} · score {Math.round(item.score*100)}%</small></button><button className="quiet-btn" onClick={()=>addSceneRange(item.start_seconds,item.end_seconds)} disabled={media.missing||timeline.length>=300}>Add</button></div>)}</div>}
+            {!media?<div className="scene-empty">No footage selected</div>:!media.has_audio&&clipMode==="speech"?<div className="scene-empty">This source has no audio track</div>:highlights.length===0?<div className={`scene-empty ${highlightScanning?"working listen":""}`}>{highlightScanning?(clipMode==="gameplay"?"Scanning the gameplay…":"Listening to the speech…"):`Ranks ${CLIP_LENGTHS[clipLength][0]}–${CLIP_LENGTHS[clipLength][1]} s moments`}</div>:<div className="scene-ranges">{highlights.map(item=><div className="scene-range" key={item.id}><button className="scene-preview" onClick={()=>{setMonitorMode("source");previewSceneRange(item.start_seconds)}} title={item.reason}><span>{item.title||"Untitled clip"}</span><small>{formatDuration(item.start_seconds)} – {formatDuration(item.end_seconds)} · score {Math.round(item.score*100)}%</small></button><button className="quiet-btn" onClick={()=>addSceneRange(item.start_seconds,item.end_seconds)} disabled={media.missing||timeline.length>=300}>Add</button></div>)}</div>}
           </div>
           <div className="scene-card">
             <div className="scene-header"><div><b>Scene cuts</b></div><button className="small-btn" onClick={()=>void findSceneCuts()} disabled={!active||!media||media.missing||sceneScanning}>{sceneScanning?"Scanning…":"Find"}</button></div>

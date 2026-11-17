@@ -9,6 +9,8 @@ Free and local: no paid services, no cloud APIs, no API keys, no telemetry.
 ## Features
 - **Auto shorts**: link or file in, ranked clip suggestions out. Each suggestion has an editable title, description and hashtags.
 - **Local transcription** with [whisper.cpp](https://github.com/ggml-org/whisper.cpp). English uses a fast model; other languages use `large-v3-turbo`.
+- **Gameplay mode** for console and PC captures with little or no talking: clips are picked from sudden bursts of game sound, sustained loudness and on-screen motion, and framed so the whole moment fits with a short lead-in. Add the game's name for matching titles and hashtags (e.g. `#gta6 #gta6gameplay`). Auto mode switches to it when speech covers less than 15% of the video, or when whisper is not installed.
+- **Clip length** presets: 10–30 s, 15–60 s or 30–90 s.
 - **Clip picking is a heuristic, not AI.** Windows are scored on speaking pace, opening hook, energy, clean sentence endings and, for YouTube imports, the "Most replayed" graph when available.
 - **Face framing** with a small ONNX face detector (falls back to whole-frame Fit framing without it).
 - **Editor**: single-track timeline (split, trim, reorder, undo/redo), positioned voice/music/effects clips, SRT burn-in, scene-cut and silence finders.
