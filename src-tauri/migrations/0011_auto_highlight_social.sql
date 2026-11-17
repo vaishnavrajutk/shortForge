@@ -1,0 +1,4 @@
+ALTER TABLE auto_highlights
+  ADD COLUMN language TEXT NOT NULL DEFAULT '',
+  ADD COLUMN description TEXT NOT NULL DEFAULT '',
+  ADD COLUMN hashtags TEXT NOT NULL DEFAULT '';

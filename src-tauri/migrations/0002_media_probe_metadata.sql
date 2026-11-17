@@ -1,0 +1,3 @@
+ALTER TABLE media_assets
+  ADD COLUMN frame_rate TEXT NOT NULL DEFAULT 'unknown',
+  ADD COLUMN has_audio BOOLEAN NOT NULL DEFAULT FALSE;

@@ -1,0 +1,31 @@
+[package]
+name = "shortforge"
+version = "0.1.0"
+description = "Local-first video repurposing studio"
+authors = ["vishnupt.dev"]
+edition = "2021"
+
+[lib]
+name = "shortforge_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "migrate", "macros"] }
+tokio = { version = "1", features = ["process", "fs", "time", "sync", "io-util", "macros", "net"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+thiserror = "2"
+tract-onnx = "0.21"
+
+# Model inference and media crates are slow unoptimised; keep app code fast to rebuild.
+[profile.dev.package."*"]
+opt-level = 2

@@ -1,0 +1,40 @@
+# Dependencies and build output
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+*.tsbuildinfo
+.gotmp/
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+
+# Logs, OS and editor files
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.scratch/
+
+# Local tools and models (downloaded by the user, see README)
+tools/ffmpeg/
+tools/whisper/
+tools/yt-dlp/
+tools/models/
+
+# AI assistant files and folders
+.claude/
+.claude-mem/
+.impeccable/
+.taste-skill/
+.cursor/
+.windsurf/
+.aider*
+.github/copilot-instructions.md
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+.mcp.json

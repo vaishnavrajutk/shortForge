@@ -1,0 +1,33 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    container_name: shortforge-web
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:1420:80"
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: shortforge-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: shortforge
+      POSTGRES_USER: shortforge
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-shortforge_dev_password}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-55434}:5432"
+    volumes:
+      - shortforge_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shortforge -d shortforge"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  shortforge_pgdata:
