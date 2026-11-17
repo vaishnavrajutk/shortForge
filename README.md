@@ -36,7 +36,7 @@ Only download videos you own or have permission to use.
 
 ## Quick start
 ```powershell
-git clone <repo-url> ShortForge
+git clone https://github.com/vishnuptdev/shortForge.git ShortForge
 cd ShortForge
 docker compose up -d postgres
 npm install
